@@ -29,14 +29,14 @@ public class BacktestService
 
     private readonly CryptoDataService _dataService;
     private readonly RiskManager _riskManager;
-    private readonly SwingTradingLongStrategy _strategy;
+    private readonly SwingTradingShortStrategy _strategy;
     private readonly decimal _initialCapital;
 
     public BacktestService(decimal initialCapital, decimal rewardRiskRatio = 2.0m, decimal capitalPerTrade = decimal.MaxValue)
     {
         _initialCapital = initialCapital;
         _dataService = new CryptoDataService();
-        _strategy = new SwingTradingLongStrategy();
+        _strategy = new SwingTradingShortStrategy();
         _riskManager = new RiskManager(
             initialCapital,
             riskPercentPerTrade: 0.02m,

@@ -8,14 +8,14 @@ public class BotSchedulerService
 {
     private const int CandlesPerAnalysis = 300;  // stessa finestra del backtest
     private const int MaxConcurrentFetches = 4;
-    private const int MinCandlesForAnalysis = SwingTradingLongStrategy.MinCandles; // minimo richiesto dalla strategia
+    private const int MinCandlesForAnalysis = SwingTradingShortStrategy.MinCandles; // minimo richiesto dalla strategia
     // Un segnale viene valutato solo entro questo tempo dalla chiusura della candela (niente ingressi in ritardo)
     private static readonly TimeSpan SignalFreshness = TimeSpan.FromMinutes(30);
 
     private readonly CryptoDataService _dataService;
     private readonly NotificationService _notificationService;
     private readonly ReportingService _reportingService;
-    private readonly SwingTradingLongStrategy _emaRibbonStrategy;
+    private readonly SwingTradingShortStrategy _emaRibbonStrategy;
     private readonly RiskManager _riskManager;
     private Timer? _marketCheckTimer;
     private Timer? _weeklyReportTimer;
@@ -43,7 +43,7 @@ public class BotSchedulerService
         _dataService = new CryptoDataService();
         _notificationService = new NotificationService();
         _reportingService = new ReportingService();
-        _emaRibbonStrategy = new SwingTradingLongStrategy();
+        _emaRibbonStrategy = new SwingTradingShortStrategy();
         _riskManager = new RiskManager(
             initialCapital,
             riskPercentPerTrade: 0.02m,      // 2% rischio per trade
@@ -66,7 +66,7 @@ public class BotSchedulerService
         }
 
         _isRunning = true;
-        Console.WriteLine("\n🤖 Bot Cripto avviato! (paper trading: nessun ordine reale)");
+        Console.WriteLine("\n🤖 Bot 8 avviato! (paper trading: nessun ordine reale)");
         Console.WriteLine($"📊 Monitoraggio ogni {CheckInterval.TotalMinutes:F0} minuti, candele {_timeframe}...\n");
 
         // Esegui il primo controllo immediatamente
@@ -110,7 +110,7 @@ public class BotSchedulerService
         _isRunning = false;
         _marketCheckTimer?.Dispose();
         _weeklyReportTimer?.Dispose();
-        Console.WriteLine("\n🛑 Bot Cripto fermato.");
+        Console.WriteLine("\n🛑 Bot 8 fermato.");
     }
 
     private async Task CheckMarketAsync()

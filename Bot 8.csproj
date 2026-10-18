@@ -6,7 +6,7 @@
     <RootNamespace>BotCripto</RootNamespace>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
-    <AssemblyName>Bot 7</AssemblyName>
+    <AssemblyName>Bot 8</AssemblyName>
   </PropertyGroup>
 
   <ItemGroup>
