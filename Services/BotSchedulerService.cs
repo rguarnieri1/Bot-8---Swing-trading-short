@@ -117,10 +117,12 @@ public class BotSchedulerService
             return;
         }
 
+        CycleRecord? cycle = null;
         try
         {
             _checksPerformed++;
             var now = DateTime.UtcNow;
+            cycle = new CycleRecord { CycleNumber = _checksPerformed, StartTime = now, Timeframe = _timeframe };
             Console.WriteLine($"\n⏱️  Ciclo #{_checksPerformed} - {now:yyyy-MM-dd HH:mm:ss} UTC");
 
             // Cache per ciclo; il download è limitato a poche richieste concorrenti
@@ -167,6 +169,9 @@ public class BotSchedulerService
             var lastClosedTime = lastCloseEnd - _timeframeSpan;
             bool newCandle = lastCloseEnd != null && now - lastCloseEnd.Value <= SignalFreshness && _lastScannedCandle != lastClosedTime;
 
+            cycle.NewCandle = newCandle;
+            cycle.SignalCandleTime = lastClosedTime;
+
             if (!newCandle)
             {
                 var nextClose = lastCloseEnd?.Add(_timeframeSpan);
@@ -178,6 +183,7 @@ public class BotSchedulerService
 
                 _lastScannedCandle = lastClosedTime;
                 var cryptos = await _dataService.GetLargeCapCryptocurrenciesAsync();
+                cycle.CryptosAnalyzed = cryptos.Count;
                 Console.WriteLine($"📈 Analizzando {cryptos.Count} criptovalute (max 500 per performance)...");
 
                 var allTrades = _reportingService.GetAllTrades();
@@ -249,8 +255,14 @@ public class BotSchedulerService
                         emaRibbonResult.Indicators.GetValueOrDefault("StopLoss")
                     );
 
+                    var signalRecord = SignalRecord.FromAnalysis(emaRibbonResult, _timeframe, lastClosedTime!.Value, entryPrice, isLong);
+
                     if (!positionResult.IsValid)
                     {
+                        // La scansione avviene una sola volta per candela: il segnale scartato viene salvato una volta sola
+                        signalRecord.Accepted = false;
+                        signalRecord.RejectionReason = RejectionLabel(positionResult.Rejection);
+                        _reportingService.SaveSignal(signalRecord);
                         signalsFiltered++;
                         CountRejection(RejectionLabel(positionResult.Rejection));
                         continue;
@@ -263,7 +275,7 @@ public class BotSchedulerService
                     emaRibbonResult.Indicators["ExpectedProfit"] = positionResult.ExpectedProfit;
 
                     await _notificationService.SendNotificationAsync(emaRibbonResult);
-                    openTrades.Add(_reportingService.RecordTrade(
+                    var trade = _reportingService.RecordTrade(
                         crypto.Symbol,
                         entryPrice,
                         "Swing Trading Long",
@@ -271,13 +283,32 @@ public class BotSchedulerService
                         positionResult.StopLossPrice,
                         positionResult.TargetPrice,
                         positionResult.PositionSize,
-                        lastClosedTime!.Value));
+                        lastClosedTime!.Value);
+                    openTrades.Add(trade);
+
+                    signalRecord.Accepted = true;
+                    signalRecord.StopLoss = positionResult.StopLossPrice;
+                    signalRecord.Target = positionResult.TargetPrice;
+                    signalRecord.PositionSize = positionResult.PositionSize;
+                    signalRecord.RiskRewardRatio = positionResult.RiskRewardRatio;
+                    signalRecord.ExpectedProfit = positionResult.ExpectedProfit;
+                    signalRecord.TradeId = trade.Id;
+                    _reportingService.SaveSignal(signalRecord);
 
                     _signalsGenerated++;
                     _tradesRecorded++;
                     signalsFound++;
                 }
             }
+
+            cycle.TradesClosed = tradesClosed;
+            cycle.SignalsFound = signalsFound;
+            cycle.SignalsFiltered = signalsFiltered;
+            cycle.OpenTrades = openTrades.Count;
+            cycle.CapitalCommitted = openTrades.Sum(t => t.EntryPrice * t.PositionSize);
+            cycle.RealizedPnl = _realizedPnl;
+            if (rejectionCounts.Count > 0)
+                cycle.RejectionCounts = Newtonsoft.Json.JsonConvert.SerializeObject(rejectionCounts);
 
             // Report del ciclo
             Console.WriteLine($"\n✅ Ciclo completato:");
@@ -323,9 +354,17 @@ public class BotSchedulerService
         catch (Exception ex)
         {
             Console.WriteLine($"❌ Errore nel controllo del mercato: {ex.Message}");
+            if (cycle != null)
+                cycle.Error = ex.Message;
         }
         finally
         {
+            // Salva il ciclo nella tabella bot8.bot8_cycles (anche se terminato con errore)
+            if (cycle != null)
+            {
+                cycle.EndTime = DateTime.UtcNow;
+                _reportingService.SaveCycle(cycle);
+            }
             Interlocked.Exchange(ref _cycleRunning, 0);
         }
     }
