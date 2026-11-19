@@ -3,7 +3,7 @@ using BotCripto.Models;
 namespace BotCripto.Strategies;
 
 // Swing trading short-only su candele chiuse (timeframe configurato, tipicamente 1d):
-//  1) trend di fondo ribassista: Close < EMA50 e EMA20 < EMA50 con EMA50 in discesa
+//  1) trend di fondo ribassista: Close < EMA50 e EMA20 < EMA50
 //  2) rimbalzo: nelle ultime candele l'RSI14 è salito sopra RsiPullback e il massimo ha toccato l'EMA20
 //  3) ripartenza al ribasso: candela ribassista che chiude sotto l'EMA20 e sotto il minimo della candela precedente,
 //     RSI in calo e non ipervenduto
@@ -12,11 +12,11 @@ public class SwingTradingShortStrategy
 {
     private const int FastEma = 20;
     private const int SlowEma = 50;
-    private const int PullbackLookback = 5;      // candele entro cui deve essere avvenuto il rimbalzo
+    private const int PullbackLookback = 8;      // candele entro cui deve essere avvenuto il rimbalzo
     private const int SwingLookback = 10;        // candele per il massimo dello swing (stop)
     private const int AtrPeriod = 14;
     private const decimal AtrStopBuffer = 0.5m;  // buffer sopra lo swing, in ATR
-    private const decimal RsiPullback = 50m;     // l'RSI deve essere salito sopra questa soglia durante il rimbalzo
+    private const decimal RsiPullback = 45m;    // l'RSI deve essere salito sopra questa soglia durante il rimbalzo
     private const decimal RsiMin = 30m;
     private const decimal MaxStopPercent = 0.15m; // stop più largo del 15% = setup scartato
     public const int MinCandles = SlowEma + 20;
@@ -42,7 +42,7 @@ public class SwingTradingShortStrategy
         var ema20 = TechnicalIndicators.CalculateEMA(closes, FastEma);
         var ema50 = TechnicalIndicators.CalculateEMA(closes, SlowEma);
         var rsi = TechnicalIndicators.CalculateRSI(closes);
-        if (ema20.Count < PullbackLookback + 1 || ema50.Count < 6 || rsi.Count < PullbackLookback + 2)
+        if (ema20.Count < PullbackLookback + 1 || ema50.Count < PullbackLookback + 1 || rsi.Count < PullbackLookback + 2)
         {
             result.Rejection = RejectionReason.InsufficientData;
             return result;
@@ -63,7 +63,7 @@ public class SwingTradingShortStrategy
         result.Indicators["EMA50"] = e50;
 
         // 1) Trend di fondo ribassista
-        if (!(last.Close < e50 && e20 < e50 && e50 < E50(5)))
+        if (!(last.Close < e50 && e20 < e50))
         {
             result.Rejection = RejectionReason.TrendNotAligned;
             return result;
@@ -74,7 +74,7 @@ public class SwingTradingShortStrategy
         for (int back = 1; back <= PullbackLookback; back++)
         {
             var c = candles[candles.Count - 1 - back];
-            if (c.High >= E20(back) && c.High <= E50(back) * 1.03m && Rsi(back) > RsiPullback)
+            if (c.High >= E20(back) && c.High <= E50(back) * 1.05m && Rsi(back) > RsiPullback)
             {
                 pullback = true;
                 break;
