@@ -26,6 +26,12 @@ public class BotSchedulerService
     // così un tick in ritardo/saltato non fa perdere il segnale. La scansione dei simboli avviene una sola volta per candela.
     private static readonly TimeSpan CheckInterval = TimeSpan.FromMinutes(20);
 
+    // Regole di gestione validate dal backtest a 4 anni (tetto 20 + uscita a 30 giorni + stop a pareggio a 1,5R: +€118 vs +€80 del solo tetto 15)
+    public const int MaxOpenPositions = 20;   // massimo di posizioni aperte contemporaneamente (0 = nessun limite)
+    public const decimal BreakevenAtR = 1.5m; // stop a pareggio quando il prezzo si muove di 1,5 volte il rischio iniziale (0 = off)
+    public const int MaxHoldDays = 30;        // uscita a mercato alla chiusura della candela dopo 30 giorni (0 = off)
+
+    private readonly decimal _rewardRiskRatio;
     private readonly string _timeframe;
     private readonly TimeSpan _timeframeSpan;
     private decimal _realizedPnl;
@@ -38,6 +44,7 @@ public class BotSchedulerService
     public BotSchedulerService(string timeframe, decimal rewardRiskRatio, decimal capitalPerTrade)
     {
         _timeframe = timeframe;
+        _rewardRiskRatio = rewardRiskRatio;
         _timeframeSpan = BacktestService.TimeframeToTimeSpan(timeframe);
         _dataService = new CryptoDataService();
         _notificationService = new NotificationService();
@@ -244,6 +251,13 @@ public class BotSchedulerService
                 // Dal segnale più forte al più debole (capitale illimitato: entrano tutti i segnali validi)
                 foreach (var (crypto, emaRibbonResult, candles) in candidates.OrderByDescending(c => c.analysis.Indicators.GetValueOrDefault("SignalStrength")))
                 {
+                    // Tetto alle posizioni aperte: i segnali sono già in ordine di forza, quelli oltre il tetto vengono scartati
+                    if (MaxOpenPositions > 0 && openTrades.Count >= MaxOpenPositions)
+                    {
+                        CountRejection($"Tetto posizioni aperte raggiunto ({MaxOpenPositions})");
+                        continue;
+                    }
+
                     var isLong = emaRibbonResult.Signal.Contains("BUY");
                     // Ingresso alla chiusura della candela del segnale (come nel backtest), non al prezzo live:
                     // lo stop della strategia è calcolato su quella candela e i controlli stop/target partono dalla successiva.
@@ -386,27 +400,63 @@ public class BotSchedulerService
             try
             {
                 var candles = await getCandlesAsync(trade.Symbol);
+                var now = DateTime.UtcNow;
+                // Rischio iniziale ricavato dal target (target = entry ± R:R × rischio): resta valido anche dopo lo spostamento dello stop
+                var initialRisk = _rewardRiskRatio > 0 ? Math.Abs(trade.EntryPrice - trade.TargetPrice) / _rewardRiskRatio : 0m;
+                bool stopMoved = false;
+
                 foreach (var candle in candles.Where(c => c.Time > trade.SignalCandleTime))
                 {
                     bool hitStop = trade.IsLong ? candle.Low <= trade.StopLoss : candle.High >= trade.StopLoss;
                     bool hitTarget = trade.IsLong ? candle.High >= trade.TargetPrice : candle.Low <= trade.TargetPrice;
-                    if (!hitStop && !hitTarget)
+
+                    decimal? exitPrice = null;
+                    string? exitReason = null;
+                    if (hitStop || hitTarget)
+                    {
+                        // Gap oltre lo stop: l'uscita avviene all'apertura della candela, non al prezzo di stop
+                        exitPrice = hitStop
+                            ? (trade.IsLong ? Math.Min(candle.Open, trade.StopLoss) : Math.Max(candle.Open, trade.StopLoss))
+                            : trade.TargetPrice;
+                        exitReason = hitStop ? (trade.StopLoss == trade.EntryPrice ? "Stop a pareggio" : "Stop loss") : "Target";
+                    }
+                    else if (candle.Time + _timeframeSpan <= now)
+                    {
+                        // Regole di gestione valide solo su candele chiuse, con effetto dalla candela successiva (come nel backtest)
+                        if (BreakevenAtR > 0 && initialRisk > 0 && trade.StopLoss != trade.EntryPrice)
+                        {
+                            var favorable = trade.IsLong ? candle.High - trade.EntryPrice : trade.EntryPrice - candle.Low;
+                            if (favorable >= BreakevenAtR * initialRisk)
+                            {
+                                trade.StopLoss = trade.EntryPrice;
+                                stopMoved = true;
+                                Console.WriteLine($"   🔒 {trade.Symbol}: stop portato a pareggio ({trade.EntryPrice})");
+                            }
+                        }
+                        if (MaxHoldDays > 0 && (candle.Time - trade.SignalCandleTime!.Value).TotalDays >= MaxHoldDays)
+                        {
+                            exitPrice = candle.Close;
+                            exitReason = $"Uscita a tempo ({MaxHoldDays} giorni)";
+                        }
+                    }
+
+                    if (exitPrice == null)
                         continue;
 
-                    // Gap oltre lo stop: l'uscita avviene all'apertura della candela, non al prezzo di stop
-                    var exitPrice = hitStop
-                        ? (trade.IsLong ? Math.Min(candle.Open, trade.StopLoss) : Math.Max(candle.Open, trade.StopLoss))
-                        : trade.TargetPrice;
                     var profitCalc = _riskManager.CalculateProfitAndTaxes(
-                        trade.EntryPrice, exitPrice, trade.PositionSize, trade.IsLong);
+                        trade.EntryPrice, exitPrice.Value, trade.PositionSize, trade.IsLong);
                     var profit = profitCalc.NetProfitBeforeTax; // tasse sul saldo netto del periodo, non per trade
                     var profitPercent = profit / (trade.EntryPrice * trade.PositionSize) * 100;
 
-                    _reportingService.ClosePaperTrade(trade, exitPrice, profit, profitPercent, hitStop ? "Stop loss" : "Target");
-                    Console.WriteLine($"   {(profit > 0 ? "✅" : "❌")} Chiuso {trade.Symbol} {(trade.IsLong ? "LONG" : "SHORT")} per {(hitStop ? "stop loss" : "target")}: €{profit:F2} ({profitPercent:F2}%)");
+                    _reportingService.ClosePaperTrade(trade, exitPrice.Value, profit, profitPercent, exitReason!);
+                    Console.WriteLine($"   {(profit > 0 ? "✅" : "❌")} Chiuso {trade.Symbol} {(trade.IsLong ? "LONG" : "SHORT")} ({exitReason}): €{profit:F2} ({profitPercent:F2}%)");
                     closed++;
+                    stopMoved = false; // già salvato con la chiusura
                     break;
                 }
+
+                if (stopMoved && trade.Status == "Open")
+                    _reportingService.SaveTradeChanges(trade);
             }
             catch (Exception ex)
             {

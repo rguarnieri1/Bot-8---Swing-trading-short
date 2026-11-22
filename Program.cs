@@ -46,6 +46,11 @@ var cmdArgs = Environment.GetCommandLineArgs();
 bool isBacktestMode = cmdArgs.Length > 1 && cmdArgs[1].ToLower() == "--backtest";
 bool isRealBacktestMode = cmdArgs.Length > 1 && cmdArgs[1].ToLower() == "--backtest-real";
 
+bool regimeFilter = false, regimeEma200 = false;
+int maxPositions = 0, maxHoldDays = 0;
+decimal breakevenR = 0m;
+string? cacheDir = null;
+
 if (isBacktestMode)
 {
     await RunBacktestAsync();
@@ -66,6 +71,23 @@ else if (isRealBacktestMode)
             timeframe = cmdArgs[++a];
         else if (cmdArgs[a] == "--symbols" && a + 1 < cmdArgs.Length)
             symbolsFile = cmdArgs[++a];
+        else if (cmdArgs[a] == "--regime")
+            regimeFilter = true;
+        else if (cmdArgs[a] == "--regime200")
+            regimeFilter = regimeEma200 = true;
+        else if (cmdArgs[a] == "--be" && a + 1 < cmdArgs.Length)
+            breakevenR = decimal.Parse(cmdArgs[++a], System.Globalization.CultureInfo.InvariantCulture);
+        else if (cmdArgs[a] == "--maxhold" && a + 1 < cmdArgs.Length)
+            maxHoldDays = int.Parse(cmdArgs[++a]);
+        else if (cmdArgs[a] == "--cache" && a + 1 < cmdArgs.Length)
+            cacheDir = cmdArgs[++a];
+        else if (cmdArgs[a] == "--p" && a + 1 < cmdArgs.Length)
+        {
+            var kv = cmdArgs[++a].Split('=', 2);
+            BotCripto.Strategies.SwingTradingShortStrategy.SetParam(kv[0], decimal.Parse(kv[1], System.Globalization.CultureInfo.InvariantCulture));
+        }
+        else if (cmdArgs[a] == "--maxpos" && a + 1 < cmdArgs.Length)
+            maxPositions = int.Parse(cmdArgs[++a]);
         else if (cmdArgs[a] == "--rr" && a + 1 < cmdArgs.Length)
             rewardRisk = decimal.Parse(cmdArgs[++a], System.Globalization.CultureInfo.InvariantCulture);
         else
@@ -108,6 +130,7 @@ async Task RunLiveAsync()
     Console.WriteLine("  • Max Crypto: 500");
     Console.WriteLine($"  • Importo per trade: €{CapitalPerTrade:F2}");
     Console.WriteLine($"  • Take profit: {RewardRiskRatio}x la distanza dello stop");
+    Console.WriteLine($"  • Max posizioni aperte: {BotSchedulerService.MaxOpenPositions} | stop a pareggio a {BotSchedulerService.BreakevenAtR}R | uscita a tempo dopo {BotSchedulerService.MaxHoldDays} giorni");
     Console.WriteLine("  • Report Settimanale: Lunedì 00:00");
     Console.WriteLine("  • Tracking Metriche: Ogni 10 cicli");
 
@@ -129,7 +152,15 @@ async Task RunRealBacktestAsync(DateTime startDate, DateTime endDate, string tim
 {
     Console.WriteLine($"\n🔍 MODALITA' BACKTEST SU DATI STORICI REALI ATTIVATA ({startDate:yyyy-MM-dd} → {endDate:yyyy-MM-dd}, {timeframe}, capitale illimitato, €{CapitalPerTrade:F2} per trade, R:R {rewardRisk})\n");
 
-    var backtestService = new BacktestService(rewardRisk, CapitalPerTrade);
+    var backtestService = new BacktestService(rewardRisk, CapitalPerTrade)
+    {
+        RegimeFilter = regimeFilter,
+        RegimeUseEma200 = regimeEma200,
+        MaxConcurrentLimit = maxPositions,
+        BreakevenAtR = breakevenR,
+        MaxHoldDays = maxHoldDays,
+        CacheDir = cacheDir
+    };
 
     try
     {

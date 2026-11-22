@@ -12,14 +12,42 @@ public class SwingTradingShortStrategy
 {
     private const int FastEma = 20;
     private const int SlowEma = 50;
-    private const int PullbackLookback = 8;      // candele entro cui deve essere avvenuto il rimbalzo
-    private const int SwingLookback = 10;        // candele per il massimo dello swing (stop)
     private const int AtrPeriod = 14;
-    private const decimal AtrStopBuffer = 0.5m;  // buffer sopra lo swing, in ATR
-    private const decimal RsiPullback = 45m;    // l'RSI deve essere salito sopra questa soglia durante il rimbalzo
-    private const decimal RsiMin = 30m;
-    private const decimal MaxStopPercent = 0.15m; // stop più largo del 15% = setup scartato
     public const int MinCandles = SlowEma + 20;
+
+    // Parametri regolabili (default = comportamento originale); si impostano da riga di comando nel backtest con --p chiave=valore
+    private static int PullbackLookback = 8;       // candele entro cui deve essere avvenuto il rimbalzo
+    private static int SwingLookback = 10;         // candele per il massimo dello swing (stop)
+    private static decimal AtrStopBuffer = 0.5m;   // buffer sopra lo swing, in ATR
+    private static decimal RsiPullback = 45m;      // l'RSI deve essere salito sopra questa soglia durante il rimbalzo
+    private static decimal RsiMin = 30m;
+    private static decimal MaxStopPercent = 0.15m; // stop più largo = setup scartato
+    private static decimal MinStopPercent = 0m;    // stop più stretto = setup scartato
+    private static decimal PullbackEmaTol = 1.05m; // il massimo del rimbalzo non deve superare EMA50 * questo valore
+    private static decimal VolMult = 0m;           // 0 = off; volume candela segnale >= VolMult * media 20 candele
+    private static decimal Ema50Falling = 0m;      // 1 = richiede EMA50 in discesa rispetto a 5 candele prima
+    private static decimal MinTrendGap = 0m;       // distanza minima (%) tra EMA20 ed EMA50 rispetto a EMA50
+    private static decimal MaxRsiNow = 100m;       // RSI massimo alla candela segnale
+
+    public static void SetParam(string key, decimal v)
+    {
+        switch (key.ToLowerInvariant())
+        {
+            case "pullbacklookback": PullbackLookback = (int)v; break;
+            case "swinglookback": SwingLookback = (int)v; break;
+            case "atrstopbuffer": AtrStopBuffer = v; break;
+            case "rsipullback": RsiPullback = v; break;
+            case "rsimin": RsiMin = v; break;
+            case "maxstop": MaxStopPercent = v; break;
+            case "minstop": MinStopPercent = v; break;
+            case "pullbackematol": PullbackEmaTol = v; break;
+            case "volmult": VolMult = v; break;
+            case "ema50falling": Ema50Falling = v; break;
+            case "mintrendgap": MinTrendGap = v; break;
+            case "maxrsinow": MaxRsiNow = v; break;
+            default: throw new ArgumentException($"Parametro strategia sconosciuto: {key}");
+        }
+    }
 
     public AnalysisResult Analyze(string symbol, List<Candle> candles)
     {
@@ -63,7 +91,9 @@ public class SwingTradingShortStrategy
         result.Indicators["EMA50"] = e50;
 
         // 1) Trend di fondo ribassista
-        if (!(last.Close < e50 && e20 < e50))
+        if (!(last.Close < e50 && e20 < e50)
+            || (e50 - e20) / e50 * 100m < MinTrendGap
+            || (Ema50Falling > 0 && ema50.Count > 5 && e50 >= E50(5)))
         {
             result.Rejection = RejectionReason.TrendNotAligned;
             return result;
@@ -74,7 +104,7 @@ public class SwingTradingShortStrategy
         for (int back = 1; back <= PullbackLookback; back++)
         {
             var c = candles[candles.Count - 1 - back];
-            if (c.High >= E20(back) && c.High <= E50(back) * 1.05m && Rsi(back) > RsiPullback)
+            if (c.High >= E20(back) && c.High <= E50(back) * PullbackEmaTol && Rsi(back) > RsiPullback)
             {
                 pullback = true;
                 break;
@@ -90,17 +120,26 @@ public class SwingTradingShortStrategy
         var rsiNow = Rsi(0);
         result.Indicators["RSI"] = rsiNow;
         bool reversal = last.Close < last.Open && last.Close < e20 && last.Close < prev.Low;
-        if (!reversal || rsiNow < RsiMin || rsiNow >= Rsi(1))
+        if (!reversal || rsiNow < RsiMin || rsiNow > MaxRsiNow || rsiNow >= Rsi(1))
         {
             result.Rejection = RejectionReason.RsiExtreme;
             return result;
+        }
+        if (VolMult > 0 && candles.Count > 21)
+        {
+            var avgVol = candles.Skip(candles.Count - 21).Take(20).Average(c => c.Volume);
+            if (avgVol > 0 && last.Volume < avgVol * VolMult)
+            {
+                result.Rejection = RejectionReason.RsiExtreme;
+                return result;
+            }
         }
 
         // Stop sopra lo swing high recente, con buffer ATR
         var atr = CalculateAtr(candles, AtrPeriod);
         var swingHigh = candles.Skip(candles.Count - SwingLookback).Max(c => c.High);
         var stop = swingHigh + atr * AtrStopBuffer;
-        if (stop <= last.Close || (stop - last.Close) / last.Close > MaxStopPercent)
+        if (stop <= last.Close || (stop - last.Close) / last.Close > MaxStopPercent || (stop - last.Close) / last.Close < MinStopPercent)
         {
             result.Rejection = RejectionReason.StopLossError;
             return result;

@@ -58,6 +58,9 @@ public class ReportingService
         LogClosedTrade(trade);
     }
 
+    // Salva le modifiche a un trade ancora aperto (es. stop spostato a pareggio)
+    public void SaveTradeChanges(Trade trade) => SaveTrades(trade);
+
     public Task CloseTradeAsync(string symbol, decimal exitPrice)
     {
         var trade = _trades.FirstOrDefault(t => t.Symbol == symbol && t.Status == "Open");

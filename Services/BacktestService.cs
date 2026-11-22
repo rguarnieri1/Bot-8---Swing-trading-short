@@ -27,6 +27,49 @@ public class BacktestService
         return candles.GetRange(start, idx + 1 - start);
     }
 
+    // Filtro di regime: apre short solo se BTC è in trend ribassista (Close < EMA50, EMA20 < EMA50 e, se RegimeUseEma200, Close < EMA200)
+    public bool RegimeFilter { get; set; }
+    public bool RegimeUseEma200 { get; set; }
+    // Massimo di posizioni aperte contemporaneamente (0 = nessun limite)
+    public int MaxConcurrentLimit { get; set; }
+    // Porta lo stop a pareggio quando il prezzo si muove di N volte il rischio iniziale a favore (0 = off)
+    public decimal BreakevenAtR { get; set; }
+    // Chiude la posizione alla chiusura della candela dopo N giorni (0 = off)
+    public int MaxHoldDays { get; set; }
+    // Cartella cache delle candele scaricate (null = nessuna cache): rende i backtest ripetuti molto più veloci
+    public string? CacheDir { get; set; }
+
+    private async Task<List<Candle>> LoadCandlesAsync(string symbol, string timeframe, DateTime from, DateTime to)
+    {
+        if (CacheDir == null)
+            return await _dataService.GetHistoricalCandlesAsync(symbol, timeframe, from, to);
+
+        Directory.CreateDirectory(CacheDir);
+        var file = Path.Combine(CacheDir, $"{symbol}_{timeframe}.csv");
+        List<Candle> all;
+        if (File.Exists(file))
+        {
+            all = File.ReadAllLines(file).Where(l => l.Length > 0).Select(l =>
+            {
+                var p = l.Split(',');
+                var inv = System.Globalization.CultureInfo.InvariantCulture;
+                return new Candle
+                {
+                    Time = DateTime.SpecifyKind(DateTime.Parse(p[0], inv, System.Globalization.DateTimeStyles.RoundtripKind), DateTimeKind.Utc),
+                    Open = decimal.Parse(p[1], inv), High = decimal.Parse(p[2], inv), Low = decimal.Parse(p[3], inv),
+                    Close = decimal.Parse(p[4], inv), Volume = decimal.Parse(p[5], inv)
+                };
+            }).ToList();
+        }
+        else
+        {
+            all = await _dataService.GetHistoricalCandlesAsync(symbol, timeframe, from, to);
+            var inv = System.Globalization.CultureInfo.InvariantCulture;
+            File.WriteAllLines(file, all.Select(c => string.Join(",", c.Time.ToString("o", inv), c.Open.ToString(inv), c.High.ToString(inv), c.Low.ToString(inv), c.Close.ToString(inv), c.Volume.ToString(inv))));
+        }
+        return all.Where(c => c.Time >= from && c.Time <= to).ToList();
+    }
+
     private readonly CryptoDataService _dataService;
     private readonly RiskManager _riskManager;
     private readonly SwingTradingShortStrategy _strategy;
@@ -91,7 +134,7 @@ public class BacktestService
         {
             try
             {
-                var candles = await _dataService.GetHistoricalCandlesAsync(symbol, timeframe, historyFrom, endDate);
+                var candles = await LoadCandlesAsync(symbol, timeframe, historyFrom, endDate);
                 if (candles.Count < WarmupCandles + 20)
                     continue; // troppo pochi dati per un warmup + una finestra di test minima
 
@@ -105,6 +148,32 @@ public class BacktestService
                 Console.WriteLine($"   ⚠️  {symbol}: {ex.Message}");
             }
         }
+
+        // Regime di mercato per candela: true = BTC ribassista (short consentiti)
+        var bearishRegime = new Dictionary<DateTime, bool>();
+        if (RegimeFilter)
+        {
+            if (!candlesBySymbol.TryGetValue("BTC", out var btc))
+            {
+                btc = (await LoadCandlesAsync("BTC", timeframe, historyFrom, endDate)).OrderBy(c => c.Time).ToList();
+            }
+            var closes = btc.Select(c => c.Close).ToList();
+            var e20 = TechnicalIndicators.CalculateEMA(closes, 20);
+            var e50 = TechnicalIndicators.CalculateEMA(closes, 50);
+            var e200 = TechnicalIndicators.CalculateEMA(closes, 200);
+            for (int i = 0; i < btc.Count; i++)
+            {
+                int i20 = i - 19, i50 = i - 49, i200 = i - 199;
+                if (i50 < 0 || i20 < 0) continue;
+                bool ok = btc[i].Close < e50[i50] && e20[i20] < e50[i50];
+                if (ok && RegimeUseEma200)
+                    ok = i200 >= 0 && btc[i].Close < e200[i200];
+                bearishRegime[btc[i].Time] = ok;
+            }
+            Console.WriteLine($"🧭 Filtro regime BTC attivo (EMA200: {RegimeUseEma200}): {bearishRegime.Count(kv => kv.Value)}/{bearishRegime.Count} giorni ribassisti");
+        }
+        if (MaxConcurrentLimit > 0)
+            Console.WriteLine($"🔒 Limite posizioni concorrenti: {MaxConcurrentLimit}");
 
         // 2) Simulazione di portafoglio con capitale illimitato: ogni segnale valido apre una posizione
         //    di importo fisso; il drawdown è misurato sulla curva del P&L cumulato (realizzato + non realizzato).
@@ -153,11 +222,24 @@ public class BacktestService
 
                 // Se in una stessa candela vengono toccati entrambi, assumiamo lo stop loss (ipotesi conservativa)
                 if (hitStop || hitTarget)
+                {
                     ClosePosition(symbol, hitStop ? pos.StopLoss : pos.Target, time, !hitStop);
+                    continue;
+                }
+
+                // Ancora aperta: gestione dinamica (effetto dalla candela successiva, ipotesi conservativa)
+                if (BreakevenAtR > 0)
+                {
+                    var favorable = pos.IsLong ? candle.High - pos.Trade.EntryPrice : pos.Trade.EntryPrice - candle.Low;
+                    if (favorable >= BreakevenAtR * pos.InitialRisk)
+                        pos.StopLoss = pos.Trade.EntryPrice;
+                }
+                if (MaxHoldDays > 0 && (time - pos.Trade.OpenTime).TotalDays >= MaxHoldDays)
+                    ClosePosition(symbol, candle.Close, time, false);
             }
 
             // b) Nuovi segnali (solo dentro la finestra richiesta), dal più forte al più debole:
-            if (time >= startDate)
+            if (time >= startDate && (!RegimeFilter || bearishRegime.GetValueOrDefault(time)))
             {
                 var candidates = new List<(string symbol, Candle candle, AnalysisResult analysis)>();
                 foreach (var (symbol, candles) in candlesBySymbol)
@@ -172,6 +254,9 @@ public class BacktestService
 
                 foreach (var (symbol, candle, analysis) in candidates.OrderByDescending(c => c.analysis.Indicators.GetValueOrDefault("SignalStrength")))
                 {
+                    if (MaxConcurrentLimit > 0 && openPositions.Count >= MaxConcurrentLimit)
+                        break;
+
                     totalSignals++;
 
                     var isLong = analysis.Signal.Contains("BUY");
@@ -196,6 +281,7 @@ public class BacktestService
                     openPositions[symbol] = new OpenPosition
                     {
                         IsLong = isLong,
+                        InitialRisk = Math.Abs(candle.Close - sizing.StopLossPrice),
                         StopLoss = sizing.StopLossPrice,
                         Target = sizing.TargetPrice,
                         Size = sizing.PositionSize,
@@ -358,6 +444,7 @@ internal class OpenPosition
 {
     public bool IsLong { get; set; }
     public decimal StopLoss { get; set; }
+    public decimal InitialRisk { get; set; }
     public decimal Target { get; set; }
     public decimal Size { get; set; }
     public Trade Trade { get; set; } = new();
