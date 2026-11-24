@@ -50,6 +50,7 @@ bool regimeFilter = false, regimeEma200 = false;
 int maxPositions = 0, maxHoldDays = 0;
 decimal breakevenR = 0m;
 string? cacheDir = null;
+bool closedOnly = false;
 
 if (isBacktestMode)
 {
@@ -71,6 +72,8 @@ else if (isRealBacktestMode)
             timeframe = cmdArgs[++a];
         else if (cmdArgs[a] == "--symbols" && a + 1 < cmdArgs.Length)
             symbolsFile = cmdArgs[++a];
+        else if (cmdArgs[a] == "--closed-only")
+            closedOnly = true;
         else if (cmdArgs[a] == "--regime")
             regimeFilter = true;
         else if (cmdArgs[a] == "--regime200")
@@ -159,7 +162,8 @@ async Task RunRealBacktestAsync(DateTime startDate, DateTime endDate, string tim
         MaxConcurrentLimit = maxPositions,
         BreakevenAtR = breakevenR,
         MaxHoldDays = maxHoldDays,
-        CacheDir = cacheDir
+        CacheDir = cacheDir,
+        ClosedOnly = closedOnly
     };
 
     try

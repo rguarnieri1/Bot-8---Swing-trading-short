@@ -38,6 +38,8 @@ public class BacktestService
     public int MaxHoldDays { get; set; }
     // Cartella cache delle candele scaricate (null = nessuna cache): rende i backtest ripetuti molto più veloci
     public string? CacheDir { get; set; }
+    // true = le posizioni ancora aperte a fine periodo sono escluse (si contano solo le operazioni chiuse da stop/target)
+    public bool ClosedOnly { get; set; }
 
     private async Task<List<Candle>> LoadCandlesAsync(string symbol, string timeframe, DateTime from, DateTime to)
     {
@@ -118,6 +120,7 @@ public class BacktestService
         int totalFiltered = 0;
         int candleSetsAnalyzed = 0;
         int closedAtEnd = 0;
+        int excludedOpen = 0;
         int maxConcurrent = 0;
         DateTime? earliestTestedCandle = null;
         DateTime? latestTestedCandle = null;
@@ -318,10 +321,19 @@ public class BacktestService
         // testata (mark-to-market), altrimenti le perdite/guadagni non realizzati sparirebbero dalle metriche.
         foreach (var symbol in openPositions.Keys.ToList())
         {
+            if (ClosedOnly)
+            {
+                // Solo operazioni chiuse: le posizioni ancora aperte a fine periodo vengono escluse dalle metriche
+                openPositions.Remove(symbol);
+                excludedOpen++;
+                continue;
+            }
             var lastCandle = candlesBySymbol[symbol].Last(c => c.Time <= endDate);
             ClosePosition(symbol, lastCandle.Close, lastCandle.Time, false);
             closedAtEnd++;
         }
+        if (ClosedOnly)
+            Console.WriteLine($"ℹ️  Solo operazioni chiuse: {excludedOpen} posizioni ancora aperte a fine periodo escluse");
 
         backtestResult.Metrics = _riskManager.CalculatePerformanceMetrics(backtestResult.Trades);
 
